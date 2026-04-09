@@ -73,9 +73,9 @@ def _write_fixture_db(path: Path) -> None:
 
         profile = {
             "cluster_id": "ORG-000001",
-            "canonical_name": "Actinomortierella wolfii",
-            "preferred_scientific_name": "Actinomortierella wolfii",
-            "scientific_names": ["Actinomortierella wolfii"],
+            "canonical_name": "\"Actinomortierella wolfii\"",
+            "preferred_scientific_name": "\"Actinomortierella wolfii\"",
+            "scientific_names": ["\"Actinomortierella wolfii\""],
             "aliases": ["Mortierella wolfii"],
             "datasets": ["fungi"],
             "dataset_versions": {"fungi": "fixture"},
@@ -83,6 +83,14 @@ def _write_fixture_db(path: Path) -> None:
             "hosts": [],
             "diseases": [],
             "risk_annotations": {
+                "cartagena": [
+                    {
+                        "dataset": "fungi",
+                        "value": "クラス2",
+                        "source_label": "7)カルタヘナ法 (実験分類)[fixture]",
+                        "source_record_id": "fungi:7",
+                    }
+                ],
                 "trba": [
                     {
                         "dataset": "fungi",
@@ -92,12 +100,23 @@ def _write_fixture_db(path: Path) -> None:
                     }
                 ]
             },
+            "source_snapshots": {
+                "fungi": {
+                    "dataset_id": "fungi",
+                    "source_url": "https://example.invalid/fungi",
+                    "source_filename": "risk_fungi_fixture.xlsx",
+                    "source_version": "fixture",
+                    "fetched_at": "2026-04-10T00:00:00Z",
+                    "content_hash": "fixture-hash",
+                    "row_count": 1,
+                }
+            },
             "source_records": [
                 {
                     "entry_id": "fungi:7",
                     "dataset": "fungi",
-                    "scientific_name": "Actinomortierella wolfii",
-                    "canonical_name": "Actinomortierella wolfii",
+                    "scientific_name": "\"Actinomortierella wolfii\"",
+                    "canonical_name": "\"Actinomortierella wolfii\"",
                     "canonical_status": "canonical",
                     "aliases": ["Mortierella wolfii"],
                 }
@@ -114,20 +133,20 @@ def _write_fixture_db(path: Path) -> None:
             """,
             (
                 "ORG-000001",
-                "Actinomortierella wolfii",
+                "\"Actinomortierella wolfii\"",
                 "actinomortierellawolfii",
-                "Actinomortierella wolfii",
+                "\"Actinomortierella wolfii\"",
                 "actinomortierellawolfii",
                 json.dumps(["fungi"], ensure_ascii=False),
-                json.dumps(["Actinomortierella wolfii"], ensure_ascii=False),
+                json.dumps(["\"Actinomortierella wolfii\""], ensure_ascii=False),
                 json.dumps(["Mortierella wolfii"], ensure_ascii=False),
                 json.dumps(profile, ensure_ascii=False),
             ),
         )
 
         alias_rows = [
-            ("ORG-000001", "Actinomortierella wolfii", "actinomortierellawolfii", "scientific_name", "fixture"),
-            ("ORG-000001", "Actinomortierella wolfii", "actinomortierellawolfii", "canonical_name", "fixture"),
+            ("ORG-000001", "\"Actinomortierella wolfii\"", "actinomortierellawolfii", "scientific_name", "fixture"),
+            ("ORG-000001", "\"Actinomortierella wolfii\"", "actinomortierellawolfii", "canonical_name", "fixture"),
             ("ORG-000001", "Mortierella wolfii", "mortierellawolfii", "alias", "fixture"),
         ]
         connection.executemany(
@@ -156,6 +175,9 @@ def test_search_finds_synonym(tmp_path):
     assert result["hits"]
     assert result["hits"][0]["canonical_name"] == "Actinomortierella wolfii"
     assert "alias" in result["hits"][0]["match_sources"]
+    assert result["hits"][0]["regulation_keys"] == ["cartagena"]
+    assert result["hits"][0]["biosafety_keys"] == ["trba"]
+    assert result["total_hits"] == 1
 
 
 def test_lookup_returns_profile_and_labels(tmp_path):
@@ -171,6 +193,11 @@ def test_lookup_returns_profile_and_labels(tmp_path):
     assert result["profile"]["canonical_name"] == "Actinomortierella wolfii"
     assert result["profile"]["dataset_labels"]["fungi"] == "真菌"
     assert result["profile"]["annotation_labels"]["trba"] == "TRBAリスクグループ"
+    assert result["profile"]["annotation_group_labels"]["regulations"] == "法令・制度"
+    assert result["profile"]["regulations"]["cartagena"]["values"] == ["クラス2"]
+    assert result["profile"]["biosafety"]["trba"]["values"] == ["‡"]
+    assert result["profile"]["source_updates"][0]["source_version"] == "fixture"
+    assert result["query"]["normalized_name"] == "mortierellawolfii"
 
 
 def test_bundled_database_is_loadable():

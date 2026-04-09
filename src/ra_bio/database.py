@@ -14,6 +14,35 @@ from pathlib import Path
 from typing import Any
 
 SEARCH_MODES = {"auto", "name"}
+ANNOTATION_GROUP_ORDER = (
+    "regulations",
+    "biosafety",
+    "designations",
+    "pathogen_profiles",
+)
+
+ANNOTATION_GROUPS = {
+    "regulations": (
+        "infection_law",
+        "domestic_animal_law",
+        "plant_protection",
+        "cartagena",
+        "foreign_exchange",
+    ),
+    "biosafety": (
+        "bsl_niid",
+        "bsl_bsj",
+        "trba",
+    ),
+    "designations": (
+        "fish_pathogen",
+        "plant_pathogen",
+        "housing_fungi",
+    ),
+    "pathogen_profiles": (
+        "fish_pathogen_profile",
+    ),
+}
 
 DATASET_LABELS = {
     "ja": {
@@ -59,10 +88,31 @@ ANNOTATION_LABELS = {
     },
 }
 
+ANNOTATION_GROUP_LABELS = {
+    "ja": {
+        "regulations": "法令・制度",
+        "biosafety": "バイオセーフティ",
+        "designations": "病原性・指定区分",
+        "pathogen_profiles": "病原体プロファイル",
+    },
+    "en": {
+        "regulations": "Regulations",
+        "biosafety": "Biosafety",
+        "designations": "Pathogen and designation flags",
+        "pathogen_profiles": "Pathogen profiles",
+    },
+}
+
+ANNOTATION_GROUP_BY_KEY = {
+    annotation_key: group_key
+    for group_key, annotation_keys in ANNOTATION_GROUPS.items()
+    for annotation_key in annotation_keys
+}
+
 
 def normalize_name(value: str) -> str:
     """Normalize organism names for deterministic exact and fuzzy matching."""
-    normalized = unicodedata.normalize("NFKC", value or "")
+    normalized = unicodedata.normalize("NFKC", _strip_wrapping_quotes(value or ""))
     normalized = normalized.replace(" ", "").replace("\u3000", "")
     normalized = normalized.casefold()
     normalized = re.sub(r"\([^)]*\)", "", normalized)
@@ -111,6 +161,50 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = (value or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        items.append(item)
+    return items
+
+
+def _strip_wrapping_quotes(value: str) -> str:
+    text = unicodedata.normalize("NFKC", value or "").strip()
+    quote_pairs = (
+        ('"', '"'),
+        ("'", "'"),
+        ("“", "”"),
+        ("‘", "’"),
+        ("「", "」"),
+        ("『", "』"),
+    )
+    while text:
+        changed = False
+        for left, right in quote_pairs:
+            if text.startswith(left) and text.endswith(right) and len(text) > len(left) + len(right):
+                text = text[len(left):-len(right)].strip()
+                changed = True
+                break
+        if not changed:
+            break
+    return text
+
+
+def _clean_name(value: Any) -> str:
+    return _strip_wrapping_quotes(str(value or ""))
+
+
+def _clean_name_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return _dedupe_preserve_order([_clean_name(value) for value in values])
 
 
 class BioDatabase:
@@ -266,6 +360,196 @@ class BioDatabase:
             "datasets": sorted(self._snapshots),
         }
 
+    def _dataset_labels(self, dataset_ids: list[str], language: str) -> dict[str, str]:
+        return {
+            dataset_id: DATASET_LABELS[language].get(dataset_id, dataset_id)
+            for dataset_id in dataset_ids
+        }
+
+    def _prepare_source_updates(self, profile: dict[str, Any], language: str) -> list[dict[str, Any]]:
+        source_snapshots = profile.get("source_snapshots")
+        if not isinstance(source_snapshots, dict):
+            return []
+
+        payload: list[dict[str, Any]] = []
+        for dataset_id in sorted(source_snapshots):
+            snapshot = source_snapshots.get(dataset_id)
+            if not isinstance(snapshot, dict):
+                continue
+            item = copy.deepcopy(snapshot)
+            item["dataset_label"] = DATASET_LABELS[language].get(dataset_id, dataset_id)
+            payload.append(item)
+        return payload
+
+    def _clean_profile_for_output(self, profile: dict[str, Any]) -> dict[str, Any]:
+        payload = copy.deepcopy(profile)
+        payload["canonical_name"] = _clean_name(payload.get("canonical_name"))
+        payload["preferred_scientific_name"] = _clean_name(payload.get("preferred_scientific_name"))
+        payload["scientific_names"] = _clean_name_list(payload.get("scientific_names"))
+        payload["aliases"] = _clean_name_list(payload.get("aliases"))
+        payload["hosts"] = _clean_name_list(payload.get("hosts"))
+        payload["diseases"] = _clean_name_list(payload.get("diseases"))
+        return payload
+
+    def _prepare_annotation_items(self, items: Any) -> list[dict[str, Any]]:
+        if not isinstance(items, list):
+            return []
+
+        payload: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            entry = copy.deepcopy(item)
+            if "value" in entry:
+                entry["value"] = str(entry.get("value") or "").strip()
+            if "hosts" in entry:
+                entry["hosts"] = _clean_name_list(entry.get("hosts"))
+            if "diseases" in entry:
+                entry["diseases"] = _clean_name_list(entry.get("diseases"))
+            if "dataset" in entry:
+                entry["dataset"] = str(entry.get("dataset") or "").strip()
+            if "source_label" in entry:
+                entry["source_label"] = str(entry.get("source_label") or "").strip()
+            if "source_record_id" in entry:
+                entry["source_record_id"] = str(entry.get("source_record_id") or "").strip()
+            if "source_reference" in entry:
+                entry["source_reference"] = str(entry.get("source_reference") or "").strip()
+            payload.append(entry)
+        return payload
+
+    def _build_annotation_index(self, profile: dict[str, Any], language: str) -> dict[str, dict[str, Any]]:
+        risk_annotations = profile.get("risk_annotations")
+        if not isinstance(risk_annotations, dict):
+            return {}
+
+        annotation_index: dict[str, dict[str, Any]] = {}
+        for annotation_key in sorted(risk_annotations):
+            group_key = ANNOTATION_GROUP_BY_KEY.get(annotation_key, "other")
+            prepared_items = self._prepare_annotation_items(risk_annotations.get(annotation_key))
+            values: list[str] = []
+            datasets: list[str] = []
+            source_labels: list[str] = []
+            source_record_ids: list[str] = []
+            hosts: list[str] = []
+            diseases: list[str] = []
+            source_references: list[str] = []
+
+            for item in prepared_items:
+                value = str(item.get("value") or "").strip()
+                if value:
+                    values.append(value)
+
+                dataset_id = str(item.get("dataset") or "").strip()
+                if dataset_id:
+                    datasets.append(dataset_id)
+
+                source_label = str(item.get("source_label") or "").strip()
+                if source_label:
+                    source_labels.append(source_label)
+
+                source_record_id = str(item.get("source_record_id") or "").strip()
+                if source_record_id:
+                    source_record_ids.append(source_record_id)
+
+                hosts.extend(item.get("hosts") or [])
+                diseases.extend(item.get("diseases") or [])
+
+                source_reference = str(item.get("source_reference") or "").strip()
+                if source_reference:
+                    source_references.append(source_reference)
+
+            annotation_index[annotation_key] = {
+                "key": annotation_key,
+                "label": ANNOTATION_LABELS[language].get(annotation_key, annotation_key),
+                "group": group_key,
+                "group_label": ANNOTATION_GROUP_LABELS[language].get(group_key, group_key),
+                "count": len(prepared_items),
+                "values": _dedupe_preserve_order(values),
+                "datasets": sorted(set(datasets)),
+                "dataset_labels": self._dataset_labels(sorted(set(datasets)), language),
+                "source_labels": _dedupe_preserve_order(source_labels),
+                "source_record_ids": _dedupe_preserve_order(source_record_ids),
+                "hosts": _dedupe_preserve_order(hosts),
+                "diseases": _dedupe_preserve_order(diseases),
+                "source_references": _dedupe_preserve_order(source_references),
+                "items": prepared_items,
+            }
+        return annotation_index
+
+    def _annotation_section(
+        self,
+        annotation_index: dict[str, dict[str, Any]],
+        *,
+        group_key: str,
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            annotation_key: copy.deepcopy(annotation_index[annotation_key])
+            for annotation_key in ANNOTATION_GROUPS[group_key]
+            if annotation_key in annotation_index
+        }
+
+    def _search_hit_preview(self, cluster_id: str) -> dict[str, Any]:
+        profile = self._profiles_by_cluster.get(cluster_id, {})
+        risk_annotations = profile.get("risk_annotations")
+        if not isinstance(risk_annotations, dict):
+            risk_annotations = {}
+
+        annotation_keys = sorted(risk_annotations)
+        regulation_keys = [
+            annotation_key for annotation_key in annotation_keys
+            if ANNOTATION_GROUP_BY_KEY.get(annotation_key) == "regulations"
+        ]
+        biosafety_keys = [
+            annotation_key for annotation_key in annotation_keys
+            if ANNOTATION_GROUP_BY_KEY.get(annotation_key) == "biosafety"
+        ]
+        designation_keys = [
+            annotation_key for annotation_key in annotation_keys
+            if ANNOTATION_GROUP_BY_KEY.get(annotation_key) == "designations"
+        ]
+        pathogen_profile_keys = [
+            annotation_key for annotation_key in annotation_keys
+            if ANNOTATION_GROUP_BY_KEY.get(annotation_key) == "pathogen_profiles"
+        ]
+
+        dataset_versions = profile.get("dataset_versions")
+        if not isinstance(dataset_versions, dict):
+            dataset_versions = {}
+
+        return {
+            "dataset_versions": copy.deepcopy(dataset_versions),
+            "annotation_keys": annotation_keys,
+            "regulation_keys": regulation_keys,
+            "biosafety_keys": biosafety_keys,
+            "designation_keys": designation_keys,
+            "pathogen_profile_keys": pathogen_profile_keys,
+            "has_hosts": bool(profile.get("hosts")),
+            "has_diseases": bool(profile.get("diseases")),
+            "has_pathogen_profile": bool(pathogen_profile_keys),
+        }
+
+    def _prepare_lookup_profile(self, cluster_id: str, language: str) -> dict[str, Any]:
+        profile = self._clean_profile_for_output(self._profiles_by_cluster[cluster_id])
+        profile["dataset_labels"] = self._dataset_labels(profile.get("datasets", []), language)
+        profile["annotation_labels"] = {
+            key: ANNOTATION_LABELS[language].get(key, key)
+            for key in profile.get("risk_annotations", {})
+        }
+        profile["annotation_group_labels"] = {
+            group_key: ANNOTATION_GROUP_LABELS[language].get(group_key, group_key)
+            for group_key in ANNOTATION_GROUP_ORDER
+        }
+        profile["annotation_group_order"] = list(ANNOTATION_GROUP_ORDER)
+        profile["source_updates"] = self._prepare_source_updates(profile, language)
+
+        annotation_index = self._build_annotation_index(profile, language)
+        profile["annotation_index"] = annotation_index
+        profile["regulations"] = self._annotation_section(annotation_index, group_key="regulations")
+        profile["biosafety"] = self._annotation_section(annotation_index, group_key="biosafety")
+        profile["designations"] = self._annotation_section(annotation_index, group_key="designations")
+        profile["pathogen_profiles"] = self._annotation_section(annotation_index, group_key="pathogen_profiles")
+        return profile
+
     def _add_hit(
         self,
         hits_by_cluster: dict[str, dict[str, Any]],
@@ -307,17 +591,19 @@ class BioDatabase:
         )
         payload: list[dict[str, Any]] = []
         for item in ranked[:limit]:
+            preview = self._search_hit_preview(item["cluster_id"])
             payload.append(
                 {
                     "cluster_id": item["cluster_id"],
-                    "canonical_name": item["canonical_name"],
-                    "preferred_scientific_name": item["preferred_scientific_name"],
+                    "canonical_name": _clean_name(item["canonical_name"]),
+                    "preferred_scientific_name": _clean_name(item["preferred_scientific_name"]),
                     "datasets": item["datasets"],
                     "score": round(item["score"], 4),
                     "match_type": item["match_type"],
-                    "matched_value": item["matched_value"],
+                    "matched_value": _clean_name(item["matched_value"]),
                     "match_sources": sorted(item["match_sources"]),
-                    "matched_terms": item["matched_terms"],
+                    "matched_terms": _clean_name_list(item["matched_terms"]),
+                    **preview,
                 }
             )
         return payload
@@ -395,7 +681,7 @@ class BioDatabase:
                 "min_score": bounded_min_score,
             },
             "hits": hits,
-            "total_hits": len(hits),
+            "total_hits": len(hits_by_cluster),
         }
 
     def lookup(
@@ -412,7 +698,7 @@ class BioDatabase:
         normalized_language = "en" if language == "en" else "ja"
         if not query_value:
             return {
-                "query": {"value": "", "language": normalized_language},
+                "query": {"value": "", "normalized_name": "", "language": normalized_language},
                 "matched": False,
                 "match": None,
                 "profile": None,
@@ -421,24 +707,24 @@ class BioDatabase:
         search_result = self.search(query=query_value, mode="name", limit=1, min_score=0.6)
         if not search_result["hits"]:
             return {
-                "query": {"value": query_value, "language": normalized_language},
+                "query": {
+                    "value": query_value,
+                    "normalized_name": normalize_name(query_value),
+                    "language": normalized_language,
+                },
                 "matched": False,
                 "match": None,
                 "profile": None,
             }
 
         best_hit = search_result["hits"][0]
-        profile = copy.deepcopy(self._profiles_by_cluster[best_hit["cluster_id"]])
-        profile["dataset_labels"] = {
-            dataset_id: DATASET_LABELS[normalized_language].get(dataset_id, dataset_id)
-            for dataset_id in profile.get("datasets", [])
-        }
-        profile["annotation_labels"] = {
-            key: ANNOTATION_LABELS[normalized_language].get(key, key)
-            for key in profile.get("risk_annotations", {})
-        }
+        profile = self._prepare_lookup_profile(best_hit["cluster_id"], normalized_language)
         return {
-            "query": {"value": query_value, "language": normalized_language},
+            "query": {
+                "value": query_value,
+                "normalized_name": normalize_name(query_value),
+                "language": normalized_language,
+            },
             "matched": True,
             "match": {
                 "cluster_id": best_hit["cluster_id"],
@@ -446,6 +732,7 @@ class BioDatabase:
                 "match_type": best_hit["match_type"],
                 "matched_value": best_hit["matched_value"],
                 "match_sources": best_hit["match_sources"],
+                "matched_terms": best_hit["matched_terms"],
             },
             "profile": profile,
         }

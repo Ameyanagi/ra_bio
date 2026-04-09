@@ -2,6 +2,9 @@
 
 from .database import (
     ANNOTATION_LABELS,
+    ANNOTATION_GROUP_LABELS,
+    ANNOTATION_GROUP_ORDER,
+    ANNOTATION_GROUPS,
     DATASET_LABELS,
     BioDatabase,
     get_bio_database,
@@ -14,6 +17,9 @@ from .database import (
 
 __all__ = [
     "ANNOTATION_LABELS",
+    "ANNOTATION_GROUP_LABELS",
+    "ANNOTATION_GROUP_ORDER",
+    "ANNOTATION_GROUPS",
     "DATASET_LABELS",
     "BioDatabase",
     "get_bio_database",
